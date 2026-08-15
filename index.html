@@ -54,6 +54,14 @@ table.data-table input{width:100%; text-align:right; border:1px solid var(--inpu
 .stub-line .val{font-family:'IBM Plex Mono',monospace; font-weight:600; white-space:nowrap;}
 .stub-line.big{padding-top:12px; margin-top:4px; border-top:1.5px solid var(--ink); border-bottom:none;}
 .stub-line.big .val{font-size:16px;}
+.scenario-diff{background:var(--gold-soft); margin:0 -8px; padding:8px; border-radius:2px; border-bottom:1px dashed var(--gold-line);}
+.scenario-diff .lbl{color:#7A5726; font-weight:600;}
+.scenario-empty{color:var(--ink-faint); font-size:12.5px; padding:20px 0; text-align:center;}
+.scenario-card{border:1px solid var(--rule); border-radius:6px; padding:14px;}
+.scenario-card input.scenario-label{width:100%; font-family:'Fraunces',serif; font-weight:600; font-size:14px; border:none; background:var(--gold-soft); padding:8px; border-radius:3px; margin-bottom:10px;}
+.scenario-btn-row{display:flex; gap:8px; margin-top:10px;}
+.scenario-btn-row button{flex:1; font-size:11px; padding:6px; border-radius:3px; border:1px solid var(--rule-strong); background:#fff; color:var(--ink-soft); cursor:pointer;}
+.scenario-btn-row button:hover{background:var(--gold-soft);}
 .val.neg{color:var(--brick);} .val.pos{color:var(--forest);}
 
 .summary-rail{background:var(--navy); border-radius:6px; padding:0; height:fit-content; position:sticky; top:20px;}
@@ -203,6 +211,14 @@ table.data-table input{width:100%; text-align:right; border:1px solid var(--inpu
         <button class="stress-btn" id="goalSeekBtn" type="button" style="margin-top:10px;">Solve</button>
         <div id="goalSeekResult" class="msg" style="display:none; margin-top:14px;"></div>
         <button class="stress-btn" id="goalSeekApplyBtn" type="button" style="display:none; margin-top:10px; background:var(--teal);">Apply this value to my plan</button>
+      </div></div>
+
+      <div class="section-title"><span class="num">10</span><h2>Scenario Comparison</h2><div class="rule"></div></div>
+      <div class="panel"><div class="panel-body">
+        <div class="panel-note">Adjust the inputs above, then save the current state into a slot below. Saved locally in this browser — persists until you clear it.</div>
+        <div id="scenarioDiffNote" class="panel-note" style="display:none; color:#7A5726;">Rows highlighted in gold are where your saved scenarios actually differ — that's what's driving the difference in ending balance.</div>
+        <svg id="scenarioChart" viewBox="0 0 900 180" style="width:100%; height:auto; display:block; margin-bottom:16px;"></svg>
+        <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:14px;" id="scenarioCards"></div>
       </div></div>
 
     </div>
@@ -625,6 +641,131 @@ function applyGoalSeekResult(){
 }
 
 /* ============================================================
+   Scenario Comparison — pure client-side (uses the already-computed
+   lastResult from the last /api/calculate call, plus localStorage).
+   No new server endpoint needed for this one.
+   ============================================================ */
+let scenarios = { A: null, B: null, C: null };
+
+function loadScenariosFromStorage(){
+  try {
+    const raw = localStorage.getItem('retirementPlanner.scenarios');
+    if (raw) scenarios = Object.assign({ A:null, B:null, C:null }, JSON.parse(raw));
+  } catch(e){ /* localStorage unavailable — scenarios stay session-only */ }
+}
+function persistScenarios(){
+  try { localStorage.setItem('retirementPlanner.scenarios', JSON.stringify(scenarios)); } catch(e){ /* ignore */ }
+}
+
+async function saveScenario(slot){
+  if (!lastResult) await recalcAll();
+  const labelEl = document.getElementById(`scenarioLabel-${slot}`);
+  scenarios[slot] = {
+    label: labelEl ? labelEl.value : `Scenario ${slot}`,
+    netCorpusForSelf: fmtINR(lastResult.netCorpusForSelf),
+    withdrawalRate: fmtPct(lastResult.withdrawalRate),
+    monthlyNet: fmtINR(lastResult.monthlyNet),
+    endBalance: fmtINR(lastResult.corpusAfterRestive),
+    endBalanceRaw: lastResult.corpusAfterRestive,
+    activeReturn: num('activeReturn'),
+    restiveReturn: num('restiveReturn'),
+    inflation: num('inflation'),
+    totalCorpus: num('totalCorpus'),
+    lifeSpanYears: num('lifeSpanYears'),
+    activePhaseYears: num('activePhaseYears'),
+    primaryNeeds: num('primaryNeeds'),
+    secondaryNeeds: num('secondaryNeeds'),
+    activeContribution: num('activeContribution'),
+  };
+  persistScenarios();
+  renderScenarioPanel();
+}
+
+function clearScenario(slot){
+  scenarios[slot] = null;
+  persistScenarios();
+  renderScenarioPanel();
+}
+
+const SCENARIO_ROWS = [
+  ['Total corpus',              s => fmtINR(s.totalCorpus),                              s => s.totalCorpus],
+  ['Net corpus for self',       s => s.netCorpusForSelf,                                 s => s.netCorpusForSelf],
+  ['Life span / Active phase',  s => `${s.lifeSpanYears}yr / ${s.activePhaseYears}yr`,   s => `${s.lifeSpanYears}|${s.activePhaseYears}`],
+  ['Active / Restive return',   s => `${s.activeReturn}% / ${s.restiveReturn}%`,          s => `${s.activeReturn}|${s.restiveReturn}`],
+  ['Inflation',                 s => `${s.inflation}%`,                                  s => s.inflation],
+  ['Primary monthly need',      s => fmtINR(s.primaryNeeds),                             s => s.primaryNeeds],
+  ['Secondary monthly need',    s => fmtINR(s.secondaryNeeds),                           s => s.secondaryNeeds],
+  ['Active-phase contribution', s => fmtINR(s.activeContribution) + '/mo',               s => s.activeContribution],
+  ['Withdrawal rate',           s => s.withdrawalRate,                                   s => s.withdrawalRate],
+  ['Monthly shortfall / surplus', s => s.monthlyNet,                                     s => s.monthlyNet],
+];
+
+function renderScenarioPanel(){
+  const slots = ['A','B','C'];
+  const savedSlots = slots.filter(slot => scenarios[slot]);
+
+  const differingRow = SCENARIO_ROWS.map(([label, fmt, raw]) => {
+    if (savedSlots.length < 2) return false;
+    const vals = savedSlots.map(slot => raw(scenarios[slot]));
+    return new Set(vals).size > 1;
+  });
+
+  const cardsEl = document.getElementById('scenarioCards');
+  cardsEl.innerHTML = slots.map(slot => {
+    const s = scenarios[slot];
+    const bodyHtml = !s
+      ? `<div class="scenario-empty">No scenario saved yet.</div>`
+      : SCENARIO_ROWS.map(([label, fmt], i) => {
+          const highlight = differingRow[i];
+          return `<div class="stub-line${highlight?' scenario-diff':''}"><span class="lbl">${label}</span><span class="val">${fmt(s)}</span></div>`;
+        }).join('') + `<div class="stub-line big"><span class="lbl">Balance at plan end</span><span class="val">${s.endBalance}</span></div>`;
+    return `
+      <div class="scenario-card">
+        <input class="scenario-label" id="scenarioLabel-${slot}" value="${s ? s.label : 'Scenario '+slot}">
+        ${bodyHtml}
+        <div class="scenario-btn-row">
+          <button type="button" onclick="saveScenario('${slot}')">Save current</button>
+          <button type="button" onclick="clearScenario('${slot}')">Clear</button>
+        </div>
+      </div>`;
+  }).join('');
+
+  document.getElementById('scenarioDiffNote').style.display = savedSlots.length >= 2 ? 'block' : 'none';
+  renderScenarioChart();
+}
+
+function renderScenarioChart(){
+  const svg = document.getElementById('scenarioChart');
+  const labels = ['A','B','C'];
+  const vals = labels.map(l => scenarios[l] ? scenarios[l].endBalanceRaw : null);
+  const validVals = vals.filter(v => v !== null);
+  if (validVals.length === 0){
+    svg.innerHTML = `<text x="450" y="90" text-anchor="middle" font-size="12" fill="#8B92A0" font-family="IBM Plex Mono, monospace">Save at least one scenario to compare.</text>`;
+    return;
+  }
+  const maxAbs = Math.max(...validVals.map(v=>Math.abs(v)), 1);
+  const W=900,H=180,padL=70,padR=20,padT=16,padB=30, plotW=W-padL-padR, plotH=H-padT-padB;
+  const zeroY = padT + plotH/2;
+  const colW = plotW/3, barW = colW*0.45;
+  let barsSvg = '';
+  labels.forEach((l,i) => {
+    const v = vals[i];
+    const x = padL + i*colW + (colW-barW)/2;
+    if (v === null){
+      barsSvg += `<text x="${(x+barW/2).toFixed(1)}" y="${zeroY.toFixed(1)}" text-anchor="middle" font-size="10" fill="#8B92A0" font-family="IBM Plex Mono, monospace">—</text>`;
+    } else {
+      const h = (Math.abs(v)/maxAbs) * (plotH/2 - 12);
+      const y = v>=0 ? zeroY-h : zeroY;
+      const color = v>=0 ? '#3C6B44' : '#A23B31';
+      barsSvg += `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${h.toFixed(1)}" fill="${color}" opacity="0.85" rx="2"/>`;
+      barsSvg += `<text x="${(x+barW/2).toFixed(1)}" y="${(v>=0? y-6 : y+h+14).toFixed(1)}" text-anchor="middle" font-size="10" fill="${color}" font-family="IBM Plex Mono, monospace">${fmtINR(v)}</text>`;
+    }
+    barsSvg += `<text x="${(x+barW/2).toFixed(1)}" y="${H-10}" text-anchor="middle" font-size="11" fill="#16233D" font-family="IBM Plex Mono, monospace">${l}</text>`;
+  });
+  svg.innerHTML = `<line x1="${padL}" y1="${zeroY.toFixed(1)}" x2="${W-padR}" y2="${zeroY.toFixed(1)}" stroke="#16233D" stroke-width="1"/>${barsSvg}`;
+}
+
+/* ============================================================
    Init
    ============================================================ */
 function setDefaultDates(){
@@ -650,6 +791,8 @@ function init(){
   document.getElementById('runSequenceBtn').addEventListener('click', runSequenceRiskTest);
   document.getElementById('goalSeekBtn').addEventListener('click', runGoalSeek);
   document.getElementById('goalSeekApplyBtn').addEventListener('click', applyGoalSeekResult);
+  loadScenariosFromStorage();
+  renderScenarioPanel();
   recalcAll();
 }
 document.addEventListener('DOMContentLoaded', init);
